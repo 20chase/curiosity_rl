@@ -224,7 +224,7 @@ def main():
 
     """
 
-    make_plots(args.logdir, args.legend, args.xaxis, args.value, args.count, 
+    make_plots(args.logdir, args.legend, args.xaxis, ["Performance", "LossForward", "Entropy", "AverageVVals", "EpLen"], args.count, 
                smooth=args.smooth, select=args.select, exclude=args.exclude,
                estimator=args.est)
 

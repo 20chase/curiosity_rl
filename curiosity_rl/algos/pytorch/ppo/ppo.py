@@ -2,8 +2,8 @@ import numpy as np
 import torch
 from torch.optim import Adam
 import gym
-import pybullet
-import pybullet_envs
+# import pybullet
+# import pybullet_envs
 import time
 import curiosity_rl.algos.pytorch.ppo.core as core
 from curiosity_rl.utils.logx import EpochLogger
@@ -92,7 +92,7 @@ class PPOBuffer:
 def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
         vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, lam=0.97, max_ep_len=1000,
-        target_kl=0.01, logger_kwargs=dict(), save_freq=10):
+        target_kl=0.01, logger_kwargs=dict(), save_freq=50):
     """
     Proximal Policy Optimization (by clipping), 
 
@@ -212,8 +212,6 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     obs_dim = env.observation_space.shape
     act_dim = env.action_space.shape
 
-    forward_model = core.ForwardModel(obs_dim[0], act_dim[0])
-
     # Create actor-critic module
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
 
@@ -257,7 +255,7 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         a = data['act']
         o2 = data['obs2']
         delta_pose = o2 - o
-        loss = forward_model.compute_loss(
+        loss = ac.forward_model.compute_loss(
             o, a, delta_pose)
 
         return loss
@@ -265,7 +263,7 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     # Set up optimizers for policy and value function
     pi_optimizer = Adam(ac.pi.parameters(), lr=pi_lr)
     vf_optimizer = Adam(ac.v.parameters(), lr=vf_lr)
-    model_optimizer = Adam(forward_model.parameters(), lr=1e-3)
+    model_optimizer = Adam(ac.forward_model.parameters(), lr=1e-3)
 
     # Set up model saving
     logger.setup_pytorch_saver(ac)
@@ -324,7 +322,7 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
 
             next_o, _, d, _ = env.step(a)
             with torch.no_grad():
-                r = forward_model.compute_loss(
+                r = ac.forward_model.compute_loss(
                     o, a, next_o - o, reduction='none'
                 )
 
@@ -359,7 +357,7 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
 
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs-1):
-            logger.save_state({'env': env}, None)
+            logger.save_state({'env': env}, epoch)
 
         # Perform PPO update!
         update()
@@ -385,15 +383,16 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='HumanoidBulletEnv-v0')
+    parser.add_argument('--env', type=str, default='Humanoid-v3')
     parser.add_argument('--hid', type=int, default=128)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
-    parser.add_argument('--cpu', type=int, default=16)
-    parser.add_argument('--steps', type=int, default=32000)
+    parser.add_argument('--cpu', type=int, default=12)
+    parser.add_argument('--steps', type=int, default=12000)
+    parser.add_argument('--kl', type=float, default=0.05)
     parser.add_argument('--epochs', type=int, default=50000)
-    parser.add_argument('--exp_name', type=str, default='ppo_curiosity')
+    parser.add_argument('--exp_name', type=str, default='ppo_curiosity_mujoco_kl_0.05')
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi
@@ -403,5 +402,5 @@ if __name__ == '__main__':
 
     ppo(lambda : gym.make(args.env), actor_critic=core.MLPActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), gamma=args.gamma, 
-        seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
+        seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs, target_kl=args.kl, 
         logger_kwargs=logger_kwargs)

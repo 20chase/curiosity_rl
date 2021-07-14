@@ -91,7 +91,8 @@ class PPOBuffer:
 
 def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
-        vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, lam=0.97, max_ep_len=1000,
+        vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, train_model_iters=80, 
+        lam=0.97, max_ep_len=1000, ent_coef=0.1, 
         target_kl=0.01, logger_kwargs=dict(), save_freq=50):
     """
     Proximal Policy Optimization (by clipping), 
@@ -234,7 +235,7 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         pi, logp = ac.pi(obs, act)
         ratio = torch.exp(logp - logp_old)
         clip_adv = torch.clamp(ratio, 1-clip_ratio, 1+clip_ratio) * adv
-        loss_pi = -(torch.min(ratio * adv, clip_adv)).mean()
+        loss_pi = -(torch.min(ratio * adv, clip_adv)).mean() - ent_coef * pi.entropy().mean()
 
         # Useful extra info
         approx_kl = (logp_old - logp).mean().item()
@@ -271,10 +272,11 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     def update():
         data = buf.get()
 
-        model_optimizer.zero_grad()
-        model_loss = compute_loss_forward_model(data)
-        model_loss.backward()
-        model_optimizer.step()
+        for i in range(train_model_iters):
+            model_optimizer.zero_grad()
+            model_loss = compute_loss_forward_model(data)
+            model_loss.backward()
+            model_optimizer.step()
 
         logger.store(LossForward=model_loss.item())
 
@@ -384,15 +386,16 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', type=str, default='Humanoid-v3')
-    parser.add_argument('--hid', type=int, default=128)
+    parser.add_argument('--hid', type=int, default=256)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--cpu', type=int, default=12)
     parser.add_argument('--steps', type=int, default=12000)
-    parser.add_argument('--kl', type=float, default=0.05)
+    parser.add_argument('--kl', type=float, default=0.2)
+    parser.add_argument('--ent_coef', type=float, default=0.1)
     parser.add_argument('--epochs', type=int, default=50000)
-    parser.add_argument('--exp_name', type=str, default='ppo_curiosity_mujoco_kl_0.05')
+    parser.add_argument('--exp_name', type=str, default='curiosity_kl_0.2_ent_0.1')
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi
@@ -402,5 +405,5 @@ if __name__ == '__main__':
 
     ppo(lambda : gym.make(args.env), actor_critic=core.MLPActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l), gamma=args.gamma, 
-        seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs, target_kl=args.kl, 
-        logger_kwargs=logger_kwargs)
+        seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs, target_kl=args.kl,
+        ent_coef=args.ent_coef, logger_kwargs=logger_kwargs)

@@ -11,6 +11,28 @@ from curiosity_rl.utils.mpi_pytorch import setup_pytorch_for_mpi, sync_params, m
 from curiosity_rl.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
 
 
+class ForwardModelBuffer:
+    def __init__(self, obs_dim, act_dim, size):
+        self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
+        self.obs2_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
+        self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
+        self.ptr, self.size, self.max_size = 0, 0, size
+    
+    def store(self, obs, act, next_obs):
+        self.obs_buf[self.ptr] = obs
+        self.obs2_buf[self.ptr] = next_obs
+        self.act_buf[self.ptr] = act
+        self.ptr = (self.ptr+1) % self.max_size
+        self.size = min(self.size+1, self.max_size)
+
+    def sample_batch(self, batch_size=32):
+        idxs = np.random.randint(0, self.size, size=batch_size)
+        batch = dict(obs=self.obs_buf[idxs],
+                     obs2=self.obs2_buf[idxs],
+                     act=self.act_buf[idxs])
+        return {k: torch.as_tensor(v, dtype=torch.float32) for k, v in batch.items()}
+
+
 class PPOBuffer:
     """
     A buffer for storing trajectories experienced by a PPO agent interacting
@@ -20,7 +42,6 @@ class PPOBuffer:
 
     def __init__(self, obs_dim, act_dim, size, gamma=0.99, lam=0.95):
         self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
-        self.obs2_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
         self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=np.float32)
         self.adv_buf = np.zeros(size, dtype=np.float32)
         self.rew_buf = np.zeros(size, dtype=np.float32)
@@ -30,13 +51,12 @@ class PPOBuffer:
         self.gamma, self.lam = gamma, lam
         self.ptr, self.path_start_idx, self.max_size = 0, 0, size
 
-    def store(self, obs, act, rew, next_obs, val, logp):
+    def store(self, obs, act, rew, val, logp):
         """
         Append one timestep of agent-environment interaction to the buffer.
         """
         assert self.ptr < self.max_size     # buffer has to have room so you can store
         self.obs_buf[self.ptr] = obs
-        self.obs2_buf[self.ptr] = next_obs
         self.act_buf[self.ptr] = act
         self.rew_buf[self.ptr] = rew
         self.val_buf[self.ptr] = val
@@ -84,7 +104,7 @@ class PPOBuffer:
         adv_mean, adv_std = mpi_statistics_scalar(self.adv_buf)
         self.adv_buf = (self.adv_buf - adv_mean) / adv_std
         data = dict(obs=self.obs_buf, act=self.act_buf, ret=self.ret_buf,
-                    obs2=self.obs2_buf, adv=self.adv_buf, logp=self.logp_buf)
+                    adv=self.adv_buf, logp=self.logp_buf)
         return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in data.items()}
 
 
@@ -225,7 +245,8 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
 
     # Set up experience buffer
     local_steps_per_epoch = int(steps_per_epoch / num_procs())
-    buf = PPOBuffer(obs_dim, act_dim, local_steps_per_epoch, gamma, lam)
+    ppo_buf = PPOBuffer(obs_dim, act_dim, local_steps_per_epoch, gamma, lam)
+    forward_model_buf = ForwardModelBuffer(obs_dim, act_dim, 100000)
 
     # Set up function for computing PPO policy loss
     def compute_loss_pi(data):
@@ -270,11 +291,12 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     logger.setup_pytorch_saver(ac)
 
     def update():
-        data = buf.get()
+        data = ppo_buf.get()
 
         for i in range(train_model_iters):
+            transition_data = forward_model_buf.sample_batch(512)
             model_optimizer.zero_grad()
-            model_loss = compute_loss_forward_model(data)
+            model_loss = compute_loss_forward_model(transition_data)
             model_loss.backward()
             model_optimizer.step()
 
@@ -332,7 +354,9 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
             ep_len += 1
 
             # save and log
-            buf.store(o, a, r, next_o, v, logp)
+            ppo_buf.store(o, a, r, v, logp)
+            forward_model_buf.store(o, a, next_o)
+
             logger.store(VVals=v)
             
             # Update obs (critical!)
@@ -350,7 +374,7 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                     _, v, _ = ac.step(torch.as_tensor(o, dtype=torch.float32))
                 else:
                     v = 0
-                buf.finish_path(v)
+                ppo_buf.finish_path(v)
                 if terminal:
                     # only save EpRet / EpLen if trajectory finished
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
@@ -393,9 +417,9 @@ if __name__ == '__main__':
     parser.add_argument('--cpu', type=int, default=12)
     parser.add_argument('--steps', type=int, default=12000)
     parser.add_argument('--kl', type=float, default=0.2)
-    parser.add_argument('--ent_coef', type=float, default=0.1)
+    parser.add_argument('--ent_coef', type=float, default=0.05)
     parser.add_argument('--epochs', type=int, default=50000)
-    parser.add_argument('--exp_name', type=str, default='curiosity_kl_0.2_ent_0.1')
+    parser.add_argument('--exp_name', type=str, default='curiosity_ent_0.05_buf')
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi

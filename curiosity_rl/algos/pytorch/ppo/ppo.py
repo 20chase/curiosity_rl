@@ -349,6 +349,7 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                 r = ac.forward_model.compute_loss(
                     o, a, next_o - o, reduction='none'
                 )
+                r -= 1.0
 
             ep_ret += r
             ep_len += 1
@@ -417,9 +418,9 @@ if __name__ == '__main__':
     parser.add_argument('--cpu', type=int, default=12)
     parser.add_argument('--steps', type=int, default=12000)
     parser.add_argument('--kl', type=float, default=0.2)
-    parser.add_argument('--ent_coef', type=float, default=0.05)
+    parser.add_argument('--ent_coef', type=float, default=0.01)
     parser.add_argument('--epochs', type=int, default=50000)
-    parser.add_argument('--exp_name', type=str, default='curiosity_ent_0.05_buf')
+    parser.add_argument('--exp_name', type=str, default='ent_0.01_buf')
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi

@@ -11,6 +11,36 @@ from curiosity_rl.utils.mpi_pytorch import setup_pytorch_for_mpi, sync_params, m
 from curiosity_rl.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
 
 
+class RunningMeanStd(object):
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
+    def __init__(self, epsilon=1e-4, shape=()):
+        self.mean = np.zeros(shape, 'float64')
+        self.var = np.ones(shape, 'float64')
+        self.count = epsilon
+
+    def update(self, x):
+        batch_mean = np.mean(x, axis=0)
+        batch_var = np.var(x, axis=0)
+        batch_count = x.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean, batch_var, batch_count):
+        self.mean, self.var, self.count = update_mean_var_count_from_moments(
+            self.mean, self.var, self.count, batch_mean, batch_var, batch_count)
+
+def update_mean_var_count_from_moments(mean, var, count, batch_mean, batch_var, batch_count):
+    delta = batch_mean - mean
+    tot_count = count + batch_count
+
+    new_mean = mean + delta * batch_count / tot_count
+    m_a = var * count
+    m_b = batch_var * batch_count
+    M2 = m_a + m_b + np.square(delta) * count * batch_count / tot_count
+    new_var = M2 / tot_count
+    new_count = tot_count
+
+    return new_mean, new_var, new_count
+
 class ForwardModelBuffer:
     def __init__(self, obs_dim, act_dim, size):
         self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
@@ -236,6 +266,9 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     # Create actor-critic module
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
 
+    ret_rms = RunningMeanStd()
+    cliprew = 10.0
+
     # Sync params across processes
     sync_params(ac)
 
@@ -349,10 +382,12 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                 r = ac.forward_model.compute_loss(
                     o, a, next_o - o, reduction='none'
                 )
-                r -= 1.0
-
+            ret = ep_ret * gamma + r
             ep_ret += r
             ep_len += 1
+
+            ret_rms.update(np.array([ret]))
+            r = np.clip(r / np.sqrt(ret_rms.var + 1e-8), -cliprew, cliprew)
 
             # save and log
             ppo_buf.store(o, a, r, v, logp)
@@ -420,7 +455,7 @@ if __name__ == '__main__':
     parser.add_argument('--kl', type=float, default=0.2)
     parser.add_argument('--ent_coef', type=float, default=0.01)
     parser.add_argument('--epochs', type=int, default=50000)
-    parser.add_argument('--exp_name', type=str, default='ent_0.01_buf')
+    parser.add_argument('--exp_name', type=str, default='kl_0.2_ent_0.01')
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi

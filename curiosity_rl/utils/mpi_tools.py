@@ -90,3 +90,5 @@ def mpi_statistics_scalar(x, with_min_and_max=False):
         global_max = mpi_op(np.max(x) if len(x) > 0 else -np.inf, op=MPI.MAX)
         return mean, std, global_min, global_max
     return mean, std
+
+

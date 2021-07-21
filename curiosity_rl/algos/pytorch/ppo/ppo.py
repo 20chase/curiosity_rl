@@ -141,7 +141,7 @@ class PPOBuffer:
 
 def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
-        vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, train_model_iters=80, 
+        vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, train_model_iters=40, 
         lam=0.97, max_ep_len=1000, ent_coef=0.1, 
         target_kl=0.01, logger_kwargs=dict(), save_freq=50):
     """
@@ -266,9 +266,6 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
     # Create actor-critic module
     ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
 
-    ret_rms = RunningMeanStd()
-    cliprew = 10.0
-
     # Sync params across processes
     sync_params(ac)
 
@@ -382,12 +379,9 @@ def ppo(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
                 r = ac.forward_model.compute_loss(
                     o, a, next_o - o, reduction='none'
                 )
-            ret = ep_ret * gamma + r
+
             ep_ret += r
             ep_len += 1
-
-            ret_rms.update(np.array([ret]))
-            r = np.clip(r / np.sqrt(ret_rms.var + 1e-8), -cliprew, cliprew)
 
             # save and log
             ppo_buf.store(o, a, r, v, logp)
@@ -452,10 +446,10 @@ if __name__ == '__main__':
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--cpu', type=int, default=12)
     parser.add_argument('--steps', type=int, default=12000)
-    parser.add_argument('--kl', type=float, default=0.2)
-    parser.add_argument('--ent_coef', type=float, default=0.01)
+    parser.add_argument('--kl', type=float, default=0.01)
+    parser.add_argument('--ent_coef', type=float, default=0.0)
     parser.add_argument('--epochs', type=int, default=50000)
-    parser.add_argument('--exp_name', type=str, default='kl_0.2_ent_0.01')
+    parser.add_argument('--exp_name', type=str, default='kl_0.01')
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi
